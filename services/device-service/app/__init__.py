@@ -4,6 +4,7 @@ This module initializes the FastAPI application with all required configurations
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -34,15 +35,84 @@ async def lifespan(app: FastAPI):
     
     # Create tables if they don't exist
     from app.database import Base
-    from app.models.device import Device, DeviceShift, ParameterHealthConfig, DeviceProperty
+    from app.models.device import (
+        Device,
+        DeviceShift,
+        ParameterHealthConfig,
+        DeviceProperty,
+        DevicePerformanceTrend,
+    )
     
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables created/verified")
+
+    stop_event = asyncio.Event()
+    trends_task = None
+
+    async def run_performance_trends_scheduler():
+        from app.database import AsyncSessionLocal
+        from app.services.performance_trends import PerformanceTrendService
+
+        interval_minutes = max(1, settings.PERFORMANCE_TRENDS_INTERVAL_MINUTES)
+        interval_seconds = interval_minutes * 60
+
+        def seconds_until_next_boundary() -> float:
+            now = datetime.now(timezone.utc)
+            next_slot = (now + timedelta(minutes=interval_minutes)).replace(second=0, microsecond=0)
+            rounded_minute = (next_slot.minute // interval_minutes) * interval_minutes
+            next_slot = next_slot.replace(minute=rounded_minute)
+            if next_slot <= now:
+                next_slot = now + timedelta(seconds=interval_seconds)
+            return (next_slot - now).total_seconds()
+
+        while not stop_event.is_set():
+            try:
+                async with AsyncSessionLocal() as session:
+                    service = PerformanceTrendService(session)
+                    summary = await service.materialize_latest_bucket()
+                    safe_summary = {
+                        "devices_total": summary.get("devices_total", 0),
+                        "created_count": summary.get("created", 0),
+                        "updated_count": summary.get("updated", 0),
+                        "failed_count": summary.get("failed", 0),
+                    }
+                    logger.info(
+                        "Performance trends bucket materialized",
+                        extra=safe_summary,
+                    )
+            except Exception as exc:
+                logger.error(
+                    "Performance trends scheduler failed",
+                    extra={"error": str(exc)},
+                )
+
+            wait_seconds = seconds_until_next_boundary()
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+
+    if settings.PERFORMANCE_TRENDS_ENABLED and settings.PERFORMANCE_TRENDS_CRON_ENABLED:
+        trends_task = asyncio.create_task(run_performance_trends_scheduler())
+        logger.info(
+            "Performance trends scheduler started",
+            extra={
+                "interval_minutes": settings.PERFORMANCE_TRENDS_INTERVAL_MINUTES,
+                "timezone": settings.PERFORMANCE_TRENDS_TIMEZONE,
+            },
+        )
     
     yield
     
     # Shutdown
+    if trends_task:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(trends_task, timeout=10)
+        except asyncio.TimeoutError:
+            trends_task.cancel()
+
     logger.info("Shutting down Device Service - closing database connections")
     await engine.dispose()
     logger.info("Device Service shutdown complete")

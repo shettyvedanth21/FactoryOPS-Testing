@@ -4,7 +4,7 @@ from datetime import datetime, time, timezone, timedelta
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import String, DateTime, Text, Integer, ForeignKey, Time
+from sqlalchemy import String, DateTime, Text, Integer, ForeignKey, Time, Float, Boolean, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -309,6 +309,51 @@ class ParameterHealthConfig(Base):
     
     def __repr__(self) -> str:
         return f"<ParameterHealthConfig(id={self.id}, device_id={self.device_id}, parameter={self.parameter_name})>"
+
+
+class DevicePerformanceTrend(Base):
+    """Materialized trend snapshots for device performance charts."""
+
+    __tablename__ = "device_performance_trends"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    device_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    bucket_start_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    bucket_end_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bucket_timezone: Mapped[str] = mapped_column(String(64), default="Asia/Kolkata", nullable=False)
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+
+    health_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    uptime_percentage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    planned_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    effective_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    break_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    points_used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    is_valid: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+        index=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("device_id", "bucket_start_utc", name="uq_perf_trend_device_bucket"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DevicePerformanceTrend(device_id={self.device_id}, bucket={self.bucket_start_utc})>"
 
 
 class DeviceProperty(Base):

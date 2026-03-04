@@ -7,7 +7,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.rule import Rule, RuleStatus, RuleScope, ConditionOperator, Alert
-from app.repositories.rule import RuleRepository, AlertRepository
+from app.repositories.rule import RuleRepository, AlertRepository, ActivityEventRepository
 from app.schemas.rule import RuleCreate, RuleUpdate, RuleStatus as RuleStatusEnum
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ class RuleService:
     def __init__(self, session: AsyncSession):
         self._session = session
         self._repository = RuleRepository(session)
+        self._activity_service = ActivityEventService(session)
 
     async def create_rule(self, rule_data: RuleCreate) -> Rule:
 
@@ -62,6 +63,22 @@ class RuleService:
                 "device_count": len(created_rule.device_ids),
             }
         )
+
+        try:
+            await self._activity_service.create_for_rule(
+                rule=created_rule,
+                event_type="rule_created",
+                title="Rule Created",
+                message=f"Rule '{created_rule.rule_name}' created for property '{created_rule.property}'.",
+                metadata_json={
+                    "property": created_rule.property,
+                    "condition": created_rule.condition,
+                    "threshold": created_rule.threshold,
+                    "scope": created_rule.scope,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist rule_created activity event", extra={"error": str(exc)})
 
         return created_rule
 
@@ -133,6 +150,22 @@ class RuleService:
             extra={"rule_id": str(updated_rule.rule_id)}
         )
 
+        try:
+            await self._activity_service.create_for_rule(
+                rule=updated_rule,
+                event_type="rule_updated",
+                title="Rule Updated",
+                message=f"Rule '{updated_rule.rule_name}' was updated.",
+                metadata_json={
+                    "property": updated_rule.property,
+                    "condition": updated_rule.condition,
+                    "threshold": updated_rule.threshold,
+                    "scope": updated_rule.scope,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist rule_updated activity event", extra={"error": str(exc)})
+
         return updated_rule
 
     async def update_rule_status(
@@ -156,6 +189,16 @@ class RuleService:
                     "new_status": status.value,
                 }
             )
+            try:
+                await self._activity_service.create_for_rule(
+                    rule=rule,
+                    event_type="rule_status_changed",
+                    title="Rule Status Changed",
+                    message=f"Rule '{rule.rule_name}' status changed to '{status.value}'.",
+                    metadata_json={"status": status.value},
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist rule_status_changed activity event", extra={"error": str(exc)})
         return rule
 
     async def delete_rule(
@@ -180,6 +223,17 @@ class RuleService:
             }
         )
 
+        try:
+            await self._activity_service.create_for_rule(
+                rule=rule,
+                event_type="rule_deleted" if not soft else "rule_archived",
+                title="Rule Deleted" if not soft else "Rule Archived",
+                message=f"Rule '{rule.rule_name}' was {'deleted' if not soft else 'archived'}.",
+                metadata_json={"soft_delete": soft},
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist rule delete activity event", extra={"error": str(exc)})
+
         return True
 
     async def get_active_rules_for_device(
@@ -197,6 +251,7 @@ class AlertService:
     def __init__(self, session: AsyncSession):
         self._session = session
         self._repository = AlertRepository(session)
+        self._activity_service = ActivityEventService(session)
 
     async def create_alert(
         self,
@@ -235,4 +290,85 @@ class AlertService:
             }
         )
 
+        try:
+            await self._activity_service.create_event(
+                event_type="rule_triggered",
+                title="Rule Triggered",
+                message=(
+                    f"Rule '{rule.rule_name}' triggered: {rule.property} {rule.condition} "
+                    f"{rule.threshold} (actual: {actual_value})."
+                ),
+                tenant_id=rule.tenant_id,
+                device_id=device_id,
+                rule_id=str(rule.rule_id),
+                alert_id=str(created_alert.alert_id),
+                metadata_json={
+                    "property": rule.property,
+                    "condition": rule.condition,
+                    "threshold": rule.threshold,
+                    "actual_value": actual_value,
+                    "severity": severity,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist rule_triggered activity event", extra={"error": str(exc)})
+
         return created_alert
+
+
+class ActivityEventService:
+    """Service layer for activity events."""
+
+    def __init__(self, session: AsyncSession):
+        self._session = session
+        self._repository = ActivityEventRepository(session)
+
+    async def create_event(
+        self,
+        *,
+        event_type: str,
+        title: str,
+        message: str,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+        rule_id: Optional[str] = None,
+        alert_id: Optional[str] = None,
+        metadata_json: Optional[dict] = None,
+    ):
+        event = await self._repository.create(
+            event_type=event_type,
+            title=title,
+            message=message,
+            tenant_id=tenant_id,
+            device_id=device_id,
+            rule_id=rule_id,
+            alert_id=alert_id,
+            metadata_json=metadata_json,
+        )
+        await self._session.commit()
+        return event
+
+    async def create_for_rule(
+        self,
+        *,
+        rule: Rule,
+        event_type: str,
+        title: str,
+        message: str,
+        metadata_json: Optional[dict] = None,
+    ) -> None:
+        target_devices: List[Optional[str]] = list(rule.device_ids or [])
+        if rule.scope == RuleScope.ALL_DEVICES.value or not target_devices:
+            target_devices = [None]
+
+        for device_id in target_devices:
+            await self._repository.create(
+                event_type=event_type,
+                title=title,
+                message=message,
+                tenant_id=rule.tenant_id,
+                device_id=device_id,
+                rule_id=str(rule.rule_id),
+                metadata_json=metadata_json or {},
+            )
+        await self._session.commit()

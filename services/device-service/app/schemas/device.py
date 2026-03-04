@@ -385,3 +385,82 @@ class AllDevicesPropertiesResponse(BaseModel):
     success: bool = True
     devices: dict[str, list[str]] = Field(..., description="Device ID to properties mapping")
     all_properties: list[str] = Field(..., description="All unique properties across devices")
+
+
+# =====================================================
+# Performance Trends Schemas
+# =====================================================
+
+class PerformanceTrendPoint(BaseModel):
+    """Schema for one performance trend point."""
+
+    timestamp: str
+    health_score: Optional[float] = None
+    uptime_percentage: Optional[float] = None
+    planned_minutes: int = 0
+    effective_minutes: int = 0
+    break_minutes: int = 0
+
+
+class PerformanceTrendResponse(BaseModel):
+    """Schema for performance trend response."""
+
+    success: bool = True
+    device_id: str
+    metric: str
+    range: str
+    interval_minutes: int
+    timezone: str
+    points: list[PerformanceTrendPoint]
+    total_points: int
+    sampled_points: int
+    message: str
+
+
+# =====================================================
+# Home Dashboard Schemas
+# =====================================================
+
+class DashboardDeviceItem(BaseModel):
+    """Per-device card data for home dashboard."""
+
+    device_id: str
+    device_name: str
+    device_type: str
+    runtime_status: str
+    location: Optional[str] = None
+    last_seen_timestamp: Optional[datetime] = None
+    health_score: Optional[float] = None
+    uptime_percentage: Optional[float] = None
+
+
+class DashboardAlertsSummary(BaseModel):
+    """System-level alert aggregates."""
+
+    active_alerts: int = 0
+    alerts_triggered: int = 0
+    alerts_cleared: int = 0
+    rules_created: int = 0
+
+
+class DashboardSystemSummary(BaseModel):
+    """Top-level KPI aggregates."""
+
+    total_devices: int = 0
+    running_devices: int = 0
+    stopped_devices: int = 0
+    devices_with_health_data: int = 0
+    devices_with_uptime_configured: int = 0
+    devices_missing_uptime_config: int = 0
+    system_health: Optional[float] = None
+    average_efficiency: Optional[float] = None
+
+
+class DashboardSummaryResponse(BaseModel):
+    """Home dashboard API response."""
+
+    success: bool = True
+    generated_at: datetime
+    summary: DashboardSystemSummary
+    alerts: DashboardAlertsSummary
+    devices: list[DashboardDeviceItem]

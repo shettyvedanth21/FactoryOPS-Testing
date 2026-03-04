@@ -4,13 +4,45 @@ import { useEffect, useState, useRef } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 
-import { getDeviceById, Device, getShifts, createShift, deleteShift, Shift, ShiftCreate, getUptime, UptimeData, getHealthConfigs, createHealthConfig, deleteHealthConfig, updateHealthConfig, HealthConfig, HealthConfigCreate, calculateHealthScore, HealthScore, TelemetryValues, validateHealthWeights, WeightValidation } from "@/lib/deviceApi";
-import { getTelemetry, TelemetryPoint } from "@/lib/dataApi";
+import {
+  getDeviceById,
+  Device,
+  getShifts,
+  createShift,
+  deleteShift,
+  Shift,
+  ShiftCreate,
+  getUptime,
+  UptimeData,
+  getHealthConfigs,
+  createHealthConfig,
+  deleteHealthConfig,
+  updateHealthConfig,
+  HealthConfig,
+  HealthConfigCreate,
+  calculateHealthScore,
+  HealthScore,
+  TelemetryValues,
+  validateHealthWeights,
+  WeightValidation,
+  getPerformanceTrends,
+  PerformanceTrendData,
+  PerformanceTrendRange,
+  PerformanceTrendMetric,
+} from "@/lib/deviceApi";
+import {
+  getTelemetry,
+  TelemetryPoint,
+  getActivityEvents,
+  getActivityUnreadCount,
+  markAllActivityRead,
+  clearActivityHistory,
+  ActivityEvent,
+} from "@/lib/dataApi";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { RealTimeGauge } from "@/components/charts/Gauge";
 import { TimeSeriesChart } from "@/components/charts/telemetry-charts";
 import { MachineRulesView } from "@/app/machines/[deviceId]/rules/machine-rules-view";
 import { formatIST, getRelativeTime } from "@/lib/utils";
@@ -46,6 +78,15 @@ const DAYS_OF_WEEK = [
   { value: 4, label: "Friday" }, { value: 5, label: "Saturday" }, { value: 6, label: "Sunday" },
 ];
 
+const TREND_RANGE_OPTIONS: { label: string; value: PerformanceTrendRange }[] = [
+  { label: "30m", value: "30m" },
+  { label: "1h", value: "1h" },
+  { label: "6h", value: "6h" },
+  { label: "24h", value: "24h" },
+  { label: "7d", value: "7d" },
+  { label: "30d", value: "30d" },
+];
+
 function getDynamicMetrics(telemetry: TelemetryPoint[]): string[] {
   const latest = telemetry.at(-1);
   if (!latest) return [];
@@ -64,12 +105,31 @@ function getMetricData(telemetry: TelemetryPoint[], metric: string) {
     .map((t) => ({ timestamp: t.timestamp, value: (t as any)[metric] as number }));
 }
 
+function sortTelemetryAsc(items: TelemetryPoint[]): TelemetryPoint[] {
+  return [...items].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+}
+
+function sortTelemetryDesc(items: TelemetryPoint[]): TelemetryPoint[] {
+  return [...items].sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
+
 function formatTimestamp(ts: string): string {
   try {
     const date = new Date(ts);
     if (isNaN(date.getTime())) return ts;
     return date.toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
   } catch { return ts; }
+}
+
+function formatEventType(eventType: string): string {
+  return eventType
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function UptimeCircle({ uptime, onClick }: { uptime: UptimeData | null; onClick: () => void }) {
@@ -156,7 +216,43 @@ function HealthScoreCircle({ healthScore, onClick }: { healthScore: HealthScore 
   );
 }
 
-function ParameterEfficiencyCard({ 
+function getEfficiencyStatus(rawScore: number): { label: string; color: string; bgColor: string } {
+  if (rawScore >= 85) return { label: "Healthy", color: "text-green-700", bgColor: "bg-green-100" };
+  if (rawScore >= 70) return { label: "Slight Warning", color: "text-yellow-700", bgColor: "bg-yellow-100" };
+  if (rawScore >= 40) return { label: "Warning", color: "text-orange-700", bgColor: "bg-orange-100" };
+  return { label: "Critical", color: "text-red-700", bgColor: "bg-red-100" };
+}
+
+function calculateMetricScore(value: number, config: HealthConfig | null): number | null {
+  if (!config || config.normal_min === null || config.normal_max === null) return null;
+  const { normal_min, normal_max, max_min, max_max } = config;
+  const idealCenter = (normal_min + normal_max) / 2;
+  const halfRange = (normal_max - normal_min) / 2 || 1;
+
+  if (value >= normal_min && value <= normal_max) {
+    const deviation = Math.abs(value - idealCenter);
+    const score = 100 - (deviation / halfRange) * 30;
+    return Math.max(70, Math.min(100, score));
+  }
+
+  if (max_min !== null && max_max !== null) {
+    if (value < normal_min) {
+      if (value < max_min) return Math.max(0, 25 - (max_min - value) * 10);
+      const overshoot = normal_min - value;
+      const tolerance = normal_min - max_min || 1;
+      return Math.max(25, Math.min(69, 70 - (overshoot / tolerance) * 45));
+    }
+    if (value > max_max) return Math.max(0, 25 - (value - max_max) * 10);
+    const overshoot = value - normal_max;
+    const tolerance = max_max - normal_max || 1;
+    return Math.max(25, Math.min(69, 70 - (overshoot / tolerance) * 45));
+  }
+
+  const deviation = value < normal_min ? normal_min - value : value - normal_max;
+  return Math.max(25, Math.min(69, 70 - deviation * 10));
+}
+
+function ParameterEfficiencyCard({
   metric, 
   value, 
   healthConfig,
@@ -167,73 +263,88 @@ function ParameterEfficiencyCard({
   healthConfig: HealthConfig | null;
   onConfigure: () => void;
 }) {
-  const range = METRIC_RANGES[metric] || [0, 100];
-  
-  const getEfficiencyStatus = (rawScore: number): { label: string; color: string; bgColor: string } => {
-    if (rawScore >= 85) return { label: "Healthy", color: "text-green-600", bgColor: "bg-green-50" };
-    if (rawScore >= 70) return { label: "Slight Warning", color: "text-yellow-600", bgColor: "bg-yellow-50" };
-    if (rawScore >= 40) return { label: "Warning", color: "text-orange-600", bgColor: "bg-orange-50" };
-    return { label: "Critical", color: "text-red-600", bgColor: "bg-red-50" };
-  };
-  
-  const calculateScore = (val: number, config: HealthConfig): number => {
-    const { normal_min, normal_max, max_min, max_max } = config;
-    if (normal_min === null || normal_max === null) return 100;
-    
-    const idealCenter = (normal_min + normal_max) / 2;
-    const halfRange = (normal_max - normal_min) / 2 || 1;
-    
-    if (val >= normal_min && val <= normal_max) {
-      const deviation = Math.abs(val - idealCenter);
-      const score = 100 - (deviation / halfRange) * 30;
-      return Math.max(70, Math.min(100, score));
-    }
-    
-    if (max_min !== null && max_max !== null) {
-      if (val < normal_min) {
-        if (val < max_min) return Math.max(0, 25 - (max_min - val) * 10);
-        const overshoot = normal_min - val;
-        const tolerance = normal_min - max_min || 1;
-        return Math.max(25, Math.min(69, 70 - (overshoot / tolerance) * 45));
-      } else {
-        if (val > max_max) return Math.max(0, 25 - (val - max_max) * 10);
-        const overshoot = val - normal_max;
-        const tolerance = max_max - normal_max || 1;
-        return Math.max(25, Math.min(69, 70 - (overshoot / tolerance) * 45));
-      }
-    }
-    
-    const deviation = val < normal_min ? normal_min - val : val - normal_max;
-    return Math.max(25, Math.min(69, 70 - deviation * 10));
-  };
-  
-  const hasConfig = healthConfig !== null;
-  const score = hasConfig ? calculateScore(value, healthConfig) : null;
+  const fallbackRange = METRIC_RANGES[metric] || [0, 100];
+  const min = healthConfig?.max_min ?? healthConfig?.normal_min ?? fallbackRange[0];
+  const max = healthConfig?.max_max ?? healthConfig?.normal_max ?? fallbackRange[1];
+  const denominator = Math.max(max - min, 1);
+  const valuePct = Math.max(0, Math.min(100, ((value - min) / denominator) * 100));
+
+  const normalMin = healthConfig?.normal_min ?? null;
+  const normalMax = healthConfig?.normal_max ?? null;
+  const hasNormalRange = normalMin !== null && normalMax !== null;
+  const normalStartPct = hasNormalRange ? Math.max(0, Math.min(100, ((normalMin - min) / denominator) * 100)) : null;
+  const normalEndPct = hasNormalRange ? Math.max(0, Math.min(100, ((normalMax - min) / denominator) * 100)) : null;
+  const optimalMidPct = hasNormalRange ? Math.max(0, Math.min(100, ((((normalMin as number) + (normalMax as number)) / 2 - min) / denominator) * 100)) : null;
+
+  const score = calculateMetricScore(value, healthConfig);
   const status = score !== null ? getEfficiencyStatus(score) : null;
-  
+
   return (
-    <div className="p-4 rounded-lg border bg-white">
-      <div className="flex items-center justify-between mb-2">
-        <h4 className="font-medium text-sm">{METRIC_LABELS[metric] || metric}</h4>
-        {!hasConfig && (
-          <button onClick={onConfigure} className="text-xs text-blue-600 hover:underline">
-            Configure
-          </button>
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm hover:shadow-md transition-shadow">
+      <div className="flex items-start justify-between gap-3 mb-4">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.18em] font-semibold text-slate-500">
+            {METRIC_LABELS[metric] || metric}
+          </p>
+          <p className="text-3xl font-bold text-slate-900 mt-2">
+            {value.toFixed(2)}
+            <span className="text-lg font-semibold text-slate-500 ml-1">{METRIC_UNITS[metric]?.trim() || ""}</span>
+          </p>
+        </div>
+        <button
+          onClick={onConfigure}
+          className="text-xs font-medium px-2.5 py-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-100"
+        >
+          {healthConfig ? "Edit Range" : "Set Range"}
+        </button>
+      </div>
+
+      <div className="relative h-3 rounded-full bg-slate-200 overflow-hidden">
+        {hasNormalRange && normalStartPct !== null && normalEndPct !== null && (
+          <div
+            className="absolute top-0 h-full bg-emerald-100"
+            style={{ left: `${Math.min(normalStartPct, normalEndPct)}%`, width: `${Math.abs(normalEndPct - normalStartPct)}%` }}
+          />
+        )}
+        <div
+          className="absolute left-0 top-0 h-full rounded-full transition-all duration-500"
+          style={{
+            width: `${valuePct}%`,
+            background: "linear-gradient(90deg, #4f46e5 0%, #6366f1 70%, #818cf8 100%)",
+          }}
+        />
+        {optimalMidPct !== null && (
+          <div className="absolute top-[-4px] bottom-[-4px] w-[2px] bg-rose-500 rounded-full" style={{ left: `${optimalMidPct}%` }} />
         )}
       </div>
-      <div className="text-2xl font-bold mb-2">
-        {value.toFixed(2)}{METRIC_UNITS[metric] || ""}
+
+      <div className="mt-3 grid grid-cols-3 gap-3 text-xs text-slate-600">
+        <p>Min: <span className="font-semibold text-slate-800">{min.toFixed(2)}</span></p>
+        <p>Max: <span className="font-semibold text-slate-800">{max.toFixed(2)}</span></p>
+        <p className="text-right">
+          Optimal:{" "}
+          <span className="font-semibold text-slate-800">
+            {hasNormalRange ? `${(normalMin as number).toFixed(2)}-${(normalMax as number).toFixed(2)}` : "Not set"}
+          </span>
+        </p>
       </div>
-      {hasConfig && score !== null && status && (
-        <div className={`text-sm ${status.color} ${status.bgColor} px-2 py-1 rounded inline-flex items-center gap-1`}>
-          Efficiency: {score.toFixed(0)}% {status.color.includes("green") ? "🟢" : status.color.includes("yellow") ? "🟡" : status.color.includes("orange") ? "🟠" : "🔴"}
-        </div>
-      )}
-      {hasConfig && (
-        <div className="mt-2 text-xs text-slate-500">
-          Normal: {healthConfig.normal_min} - {healthConfig.normal_max} | Weight: {healthConfig.weight}%
-        </div>
-      )}
+
+      <div className="mt-3 flex items-center justify-between">
+        {status ? (
+          <div className={`text-xs px-2 py-1 rounded-full font-medium ${status.color} ${status.bgColor}`}>
+            Efficiency {score?.toFixed(0)}% • {status.label}
+          </div>
+        ) : (
+          <div className="text-xs px-2 py-1 rounded-full font-medium text-slate-600 bg-slate-100">
+            Range not configured
+          </div>
+        )}
+        {healthConfig && (
+          <div className="text-xs text-slate-500">
+            Weight: <span className="font-semibold text-slate-700">{healthConfig.weight}%</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -433,6 +544,7 @@ export default function MachineDashboardPage() {
 
   const [machine, setMachine] = useState<Device | null>(null);
   const [telemetry, setTelemetry] = useState<TelemetryPoint[]>([]);
+  const [telemetryStreamRows, setTelemetryStreamRows] = useState<TelemetryPoint[]>([]);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [uptime, setUptime] = useState<UptimeData | null>(null);
   const [healthConfigs, setHealthConfigs] = useState<HealthConfig[]>([]);
@@ -443,10 +555,20 @@ export default function MachineDashboardPage() {
   const [showAddShift, setShowAddShift] = useState(false);
   const [showHealthConfig, setShowHealthConfig] = useState(false);
   const [selectedMetric, setSelectedMetric] = useState<string>("");
+  const [showAlertHistory, setShowAlertHistory] = useState(false);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [unreadEventCount, setUnreadEventCount] = useState(0);
+  const [trendMetric, setTrendMetric] = useState<PerformanceTrendMetric>("health");
+  const [trendRange, setTrendRange] = useState<PerformanceTrendRange>("1h");
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
+  const [trendData, setTrendData] = useState<PerformanceTrendData | null>(null);
   const [newShift, setNewShift] = useState<ShiftCreate>({
     shift_name: "", shift_start: "09:00", shift_end: "17:00", maintenance_break_minutes: 0, day_of_week: null, is_active: true,
   });
   const pollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const telemetryPollingInterval = useRef<NodeJS.Timeout | null>(null);
+  const latestTelemetryTimestampRef = useRef<string | null>(null);
 
   const fetchData = async (isInitial = false) => {
     try {
@@ -459,12 +581,16 @@ export default function MachineDashboardPage() {
       ]);
       // Always update machine data to get latest last_seen_timestamp
       setMachine(machineData);
-      setTelemetry(telemetryData);
+      const ascTelemetry = sortTelemetryAsc(telemetryData);
+      const descTelemetry = sortTelemetryDesc(telemetryData);
+      setTelemetry(ascTelemetry);
+      setTelemetryStreamRows(descTelemetry.slice(0, 10));
+      latestTelemetryTimestampRef.current = descTelemetry[0]?.timestamp || null;
       setUptime(uptimeData);
       setShifts(shiftsData);
       setHealthConfigs(healthConfigsData);
       
-      const latest = telemetryData.at(-1);
+      const latest = ascTelemetry.at(-1);
       if (latest && healthConfigsData.length > 0) {
         const telemetryValues: TelemetryValues = {
           values: {},
@@ -493,12 +619,78 @@ export default function MachineDashboardPage() {
     }
   };
 
+  const pollLatestTelemetry = async () => {
+    try {
+      const latestBatch = await getTelemetry(deviceId, { limit: "1" });
+      if (latestBatch.length === 0) return;
+      const latest = latestBatch[0];
+      if (!latest?.timestamp) return;
+      if (latestTelemetryTimestampRef.current === latest.timestamp) return;
+      latestTelemetryTimestampRef.current = latest.timestamp;
+
+      setTelemetryStreamRows((prev) => {
+        const next = [latest, ...prev.filter((p) => p.timestamp !== latest.timestamp)];
+        return sortTelemetryDesc(next).slice(0, 10);
+      });
+
+      // Keep local chart/history data bounded and ordered.
+      setTelemetry((prev) => {
+        const next = [...prev.filter((p) => p.timestamp !== latest.timestamp), latest];
+        return sortTelemetryAsc(next).slice(-100);
+      });
+    } catch (err) {
+      console.error("Telemetry stream poll failed:", err);
+    }
+  };
+
+  const loadActivityHistory = async () => {
+    try {
+      const [eventsResult, unreadCount] = await Promise.all([
+        getActivityEvents({ deviceId, page: 1, pageSize: 25 }),
+        getActivityUnreadCount(deviceId),
+      ]);
+      setActivityEvents(eventsResult.data);
+      setUnreadEventCount(unreadCount);
+    } catch (err) {
+      console.error("Failed to load activity history:", err);
+    }
+  };
+
+  const loadPerformanceTrends = async () => {
+    try {
+      setTrendLoading(true);
+      setTrendError(null);
+      const data = await getPerformanceTrends(deviceId, trendMetric, trendRange);
+      setTrendData(data);
+    } catch (err) {
+      setTrendError(err instanceof Error ? err.message : "Failed to load performance trends");
+    } finally {
+      setTrendLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!deviceId) return;
     fetchData(true);
-    pollingInterval.current = setInterval(() => fetchData(false), 1000);
-    return () => { if (pollingInterval.current) clearInterval(pollingInterval.current); };
+    pollingInterval.current = setInterval(() => fetchData(false), 10000);
+    telemetryPollingInterval.current = setInterval(() => pollLatestTelemetry(), 1000);
+    return () => {
+      if (pollingInterval.current) clearInterval(pollingInterval.current);
+      if (telemetryPollingInterval.current) clearInterval(telemetryPollingInterval.current);
+    };
   }, [deviceId]);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    loadActivityHistory();
+    const timer = setInterval(() => loadActivityHistory(), 5000);
+    return () => clearInterval(timer);
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    loadPerformanceTrends();
+  }, [deviceId, trendMetric, trendRange]);
 
   const handleAddShift = async () => {
     try {
@@ -537,11 +729,38 @@ export default function MachineDashboardPage() {
     } catch (err) { alert("Failed: " + (err as Error).message); }
   };
 
+  const handleMarkAllRead = async () => {
+    try {
+      await markAllActivityRead(deviceId);
+      await loadActivityHistory();
+    } catch (err) {
+      alert("Failed: " + (err as Error).message);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (!confirm("Clear all alert history for this machine?")) return;
+    try {
+      await clearActivityHistory(deviceId);
+      await loadActivityHistory();
+    } catch (err) {
+      alert("Failed: " + (err as Error).message);
+    }
+  };
+
   if (loading) return <div className="p-8"><div className="flex items-center justify-center h-64"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div></div>;
   if (error || !machine) return <div className="p-8"><div className="bg-red-50 border p-6 rounded"><h2 className="text-red-800 font-semibold">Error</h2><p className="text-red-600">{error || "Not found"}</p><Link href="/machines"><Button className="mt-4">Back</Button></Link></div></div>;
 
   const latestTelemetry = telemetry.at(-1);
   const dynamicMetrics = getDynamicMetrics(telemetry);
+  const healthPercent = typeof healthScore?.health_score === "number" ? healthScore.health_score : null;
+  const uptimePercent = typeof uptime?.uptime_percentage === "number" ? uptime.uptime_percentage : null;
+  const performanceChartData = (trendData?.points || [])
+    .map((point) => ({
+      timestamp: point.timestamp,
+      value: trendMetric === "health" ? point.health_score : point.uptime_percentage,
+    }))
+    .filter((p) => typeof p.value === "number") as Array<{ timestamp: string; value: number }>;
 
   return (
     <div className="p-8">
@@ -550,19 +769,150 @@ export default function MachineDashboardPage() {
           <div className="flex items-center gap-2 text-sm text-slate-500 mb-4">
             <Link href="/machines" className="hover:text-slate-900">Machines</Link><span>/</span><span className="text-slate-900">{machine.name}</span>
           </div>
-            <div className="flex items-start justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-slate-900">{machine.name}</h1>
-              <p className="text-slate-500 font-mono mt-1">{machine.id}</p>
-              {machine.last_seen_timestamp ? (
-                <p className="text-xs text-slate-500 mt-1">
-                  Last seen: {formatIST(machine.last_seen_timestamp)}
-                </p>
-              ) : (
-                <p className="text-xs text-slate-500 mt-1">Last seen: No data received</p>
-              )}
+          <div className="relative rounded-3xl border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-6 md:p-8 shadow-sm">
+            <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+              <div>
+                <h1 className="text-4xl font-bold tracking-tight text-slate-900">{machine.name}</h1>
+                <p className="text-slate-500 font-mono mt-1 text-lg">{machine.id}</p>
+                {machine.last_seen_timestamp ? (
+                  <p className="text-sm text-slate-500 mt-2">
+                    Last seen: {formatIST(machine.last_seen_timestamp)}
+                  </p>
+                ) : (
+                  <p className="text-sm text-slate-500 mt-2">Last seen: No data received</p>
+                )}
+              </div>
+
+              <div className="flex items-center gap-3 self-start">
+                <button
+                  type="button"
+                  onClick={() => setShowAlertHistory((prev) => !prev)}
+                  className="relative inline-flex items-center justify-center w-11 h-11 rounded-xl border border-slate-200 bg-white hover:bg-slate-50"
+                  title="Machine alert history"
+                >
+                  <svg className="w-5 h-5 text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5" />
+                    <path d="M10 17a2 2 0 0 0 4 0" />
+                  </svg>
+                  {unreadEventCount > 0 && (
+                    <span className="absolute -top-1 -right-1 min-w-5 h-5 px-1 rounded-full bg-red-600 text-white text-[10px] leading-5 text-center">
+                      {unreadEventCount > 99 ? "99+" : unreadEventCount}
+                    </span>
+                  )}
+                </button>
+                <StatusBadge status={machine.runtime_status} />
+              </div>
             </div>
-            <StatusBadge status={machine.runtime_status} />
+
+            <div className="mt-7 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Name</p>
+                <p className="text-xl font-semibold text-slate-900 mt-2">{machine.name}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Status</p>
+                <p className={`text-2xl font-bold mt-2 ${machine.runtime_status === "running" ? "text-emerald-500" : "text-rose-500"}`}>
+                  {machine.runtime_status === "running" ? "Running" : "Stopped"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">ID</p>
+                <p className="text-lg font-semibold text-slate-800 mt-2 font-mono">{machine.id}</p>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Type</p>
+                <p className="text-xl font-semibold text-slate-900 mt-2 capitalize">{machine.type || "—"}</p>
+              </div>
+              <div className="relative group rounded-xl border border-slate-200 bg-white p-4 cursor-help">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Uptime</p>
+                <p className="text-3xl font-bold text-slate-900 mt-2">{uptimePercent !== null ? `${uptimePercent.toFixed(1)}%` : "—"}</p>
+                <p className="text-[11px] text-slate-500 mt-1">Hover for calc details</p>
+                <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-72 -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Uptime Calculation</p>
+                  {uptime ? (
+                    <>
+                      <p className="text-xs text-slate-600">Active shifts: <span className="font-medium">{uptime.shifts_configured}</span></p>
+                      <p className="text-xs text-slate-600">Planned duration: <span className="font-medium">{Math.floor(uptime.total_planned_minutes / 60)}h {uptime.total_planned_minutes % 60}m</span></p>
+                      <p className="text-xs text-slate-600">Effective duration: <span className="font-medium">{Math.floor(uptime.total_effective_minutes / 60)}h {uptime.total_effective_minutes % 60}m</span></p>
+                      <p className="text-xs text-slate-500 mt-2">Formula now: effective/planned from shift configuration.</p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-slate-500">No shift configuration found.</p>
+                  )}
+                </div>
+              </div>
+              <div className="relative group rounded-xl border border-slate-200 bg-white p-4 cursor-help">
+                <p className="text-xs uppercase tracking-[0.14em] text-slate-500 font-semibold">Health Score</p>
+                <p className={`text-5xl font-extrabold mt-1 ${healthPercent !== null && healthPercent >= 70 ? "text-emerald-400" : healthPercent !== null ? "text-orange-500" : "text-slate-400"}`}>
+                  {healthPercent !== null ? `${healthPercent.toFixed(0)}%` : "—"}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1">Hover for calc details</p>
+                <div className="pointer-events-none absolute right-0 top-full z-30 mt-2 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all">
+                  <p className="text-xs font-semibold text-slate-700 mb-2">Health Score Breakdown</p>
+                  {healthScore ? (
+                    <>
+                      <p className="text-xs text-slate-600">Status: <span className="font-medium">{healthScore.status}</span></p>
+                      <p className="text-xs text-slate-600">Machine state: <span className="font-medium">{healthScore.machine_state}</span></p>
+                      <p className="text-xs text-slate-600">Parameters used: <span className="font-medium">{healthScore.parameters_included}</span>, skipped: <span className="font-medium">{healthScore.parameters_skipped}</span></p>
+                      <p className="text-xs text-slate-600">Configured weight total: <span className="font-medium">{healthScore.total_weight_configured}%</span></p>
+                      <div className="mt-2 border-t border-slate-100 pt-2 space-y-1">
+                        {healthScore.parameter_scores.slice(0, 4).map((p) => (
+                          <p key={p.parameter_name} className="text-xs text-slate-600">
+                            {p.parameter_name}: {p.raw_score.toFixed(1)}% ({p.weight}% wt)
+                          </p>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-xs text-slate-500">No health data available.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 text-sm text-slate-600">
+              <span className="font-medium text-slate-700">Location:</span> {machine.location || "—"}
+            </div>
+
+            {showAlertHistory && (
+              <div className="absolute right-6 top-16 z-40 w-[460px] max-h-[520px] bg-white border border-slate-200 shadow-xl rounded-xl overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Machine Alerts</p>
+                    <p className="text-xs text-slate-500">{machine.id}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAlertHistory(false)}
+                    className="text-slate-400 hover:text-slate-700"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="max-h-[380px] overflow-y-auto p-3 space-y-3">
+                  {activityEvents.length === 0 ? (
+                    <div className="text-center text-sm text-slate-500 py-8">No alert history</div>
+                  ) : (
+                    activityEvents.map((event) => (
+                      <div key={event.eventId} className={`rounded-lg border p-3 ${event.isRead ? "bg-slate-50 border-slate-200" : "bg-red-50 border-red-200"}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-semibold text-slate-900">{event.title}</p>
+                          <span className="text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-700">
+                            {formatEventType(event.eventType)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600 mt-1">{event.message}</p>
+                        <p className="text-[11px] text-slate-500 mt-2">{formatTimestamp(event.createdAt)}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="px-4 py-3 border-t border-slate-200 flex items-center justify-between gap-2">
+                  <Button variant="outline" size="sm" onClick={handleMarkAllRead}>Mark all read</Button>
+                  <Button variant="danger" size="sm" onClick={handleClearHistory}>Clear history</Button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -579,36 +929,19 @@ export default function MachineDashboardPage() {
 
         {activeTab === "overview" && (
           <div className="space-y-6">
-            <Card>
-              <CardHeader><CardTitle>Machine Information</CardTitle></CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-2 md:grid-cols-6 gap-6">
-                  <div><p className="text-sm text-slate-500">Name</p><p className="text-sm font-medium mt-1">{machine.name}</p></div>
-                  <div><p className="text-sm text-slate-500">ID</p><p className="text-sm font-mono mt-1">{machine.id}</p></div>
-                  <div><p className="text-sm text-slate-500">Type</p><p className="text-sm font-medium mt-1 capitalize">{machine.type}</p></div>
-                  <div><p className="text-sm text-slate-500">Location</p><p className="text-sm font-medium mt-1">{machine.location || "—"}</p></div>
-                  <div><p className="text-sm text-slate-500">Uptime</p><div className="mt-1"><UptimeCircle uptime={uptime} onClick={() => setActiveTab("parameters")} /></div></div>
-                  <div><p className="text-sm text-slate-500">Health</p><div className="mt-1"><HealthScoreCircle healthScore={healthScore} onClick={() => setActiveTab("parameters")} /></div></div>
-                </div>
-              </CardContent>
-            </Card>
-
             {dynamicMetrics.length > 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
                 {dynamicMetrics.map((metric) => {
                   const value = (latestTelemetry as any)[metric];
                   if (typeof value !== 'number') return null;
-                  const range = METRIC_RANGES[metric] || [0, 100];
                   return (
-                    <div key={metric} className="space-y-2">
-                      <RealTimeGauge value={value} label={METRIC_LABELS[metric] || metric} unit={METRIC_UNITS[metric] || ""} min={range[0]} max={range[1]} color={METRIC_COLORS[metric] || "#2563eb"} />
-                      <ParameterEfficiencyCard 
-                        metric={metric} 
-                        value={value} 
-                        healthConfig={healthConfigs.find(c => c.parameter_name === metric) || null}
-                        onConfigure={() => { setSelectedMetric(metric); setShowHealthConfig(true); }}
-                      />
-                    </div>
+                    <ParameterEfficiencyCard
+                      key={metric}
+                      metric={metric}
+                      value={value}
+                      healthConfig={healthConfigs.find(c => c.parameter_name === metric) || null}
+                      onConfigure={() => { setSelectedMetric(metric); setShowHealthConfig(true); }}
+                    />
                   );
                 })}
               </div>
@@ -623,16 +956,82 @@ export default function MachineDashboardPage() {
                 })}
               </div>
             )}
+
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between gap-4">
+                <div>
+                  <CardTitle>Performance Trends</CardTitle>
+                  <p className="text-sm text-slate-500 mt-1">Recent telemetry-derived {trendMetric} trend</p>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  <div className="inline-flex rounded-lg border border-slate-200 p-1">
+                    {([
+                      { value: "health", label: "Health" },
+                      { value: "uptime", label: "Uptime" },
+                    ] as { value: PerformanceTrendMetric; label: string }[]).map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setTrendMetric(item.value)}
+                        className={`px-3 py-1.5 text-sm rounded-md ${
+                          trendMetric === item.value
+                            ? "bg-blue-600 text-white"
+                            : "text-slate-600 hover:bg-slate-100"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="inline-flex rounded-lg border border-slate-200 p-1">
+                    {TREND_RANGE_OPTIONS.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setTrendRange(item.value)}
+                        className={`px-2.5 py-1.5 text-sm rounded-md ${
+                          trendRange === item.value
+                            ? "bg-slate-800 text-white"
+                            : "text-slate-600 hover:bg-slate-100"
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {trendLoading ? (
+                  <div className="h-64 flex items-center justify-center text-slate-500">Loading trends...</div>
+                ) : trendError ? (
+                  <div className="h-64 flex items-center justify-center text-red-600">{trendError}</div>
+                ) : performanceChartData.length === 0 ? (
+                  <div className="h-64 flex flex-col items-center justify-center text-slate-500">
+                    <p>No {trendMetric} trend data available.</p>
+                    <p className="text-sm mt-1">{trendData?.message || "Configure health/shift settings and wait for trend snapshots."}</p>
+                  </div>
+                ) : (
+                  <TimeSeriesChart
+                    data={performanceChartData}
+                    color={trendMetric === "health" ? "#10b981" : "#2563eb"}
+                    unit="%"
+                    showArea
+                    title={`${trendMetric === "health" ? "Health Score" : "Uptime"} (${trendRange})`}
+                  />
+                )}
+              </CardContent>
+            </Card>
           </div>
         )}
 
         {activeTab === "telemetry" && (
           <div className="space-y-6">
-            {telemetry.length === 0 ? <Card><CardContent className="py-12 text-center text-slate-500">No data</CardContent></Card> : (
+            {telemetryStreamRows.length === 0 ? <Card><CardContent className="py-12 text-center text-slate-500">No data</CardContent></Card> : (
               <Card>
                 <CardHeader className="flex flex-row items-center justify-between">
                   <CardTitle>Recent Telemetry</CardTitle>
-                  <span className="text-xs text-slate-400">Auto-refresh every 1s • {telemetry.length} records</span>
+                  <span className="text-xs text-slate-400">Auto-refresh every 1s • {telemetryStreamRows.length} records</span>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto">
@@ -642,7 +1041,7 @@ export default function MachineDashboardPage() {
                         {dynamicMetrics.map((m) => <th key={m} className="px-6 py-3 text-left text-xs font-medium text-slate-500">{METRIC_LABELS[m] || m}</th>)}
                       </tr></thead>
                       <tbody className="bg-white divide-y">
-                        {telemetry.slice().reverse().slice(0, 20).map((point, i) => (
+                        {telemetryStreamRows.map((point, i) => (
                           <tr key={i} className={i === 0 ? "bg-blue-50" : ""}>
                             <td className="px-6 py-3 text-sm font-mono">{formatTimestamp(point.timestamp)}</td>
                             {dynamicMetrics.map((m) => <td key={m} className="px-6 py-3 text-sm">{(point as any)[m]?.toFixed(2) ?? "—"}</td>)}

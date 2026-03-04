@@ -1,6 +1,6 @@
 """InfluxDB repository for telemetry storage and retrieval."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from influxdb_client import InfluxDBClient, Point
@@ -138,6 +138,20 @@ class InfluxDBRepository:
                     if point:
                         points.append(point)
 
+            # Enforce deterministic newest-first ordering across all returned tables.
+            points.sort(
+                key=lambda p: (
+                    p.timestamp.replace(tzinfo=timezone.utc).timestamp()
+                    if p.timestamp.tzinfo is None
+                    else p.timestamp.timestamp()
+                ),
+                reverse=True,
+            )
+
+            # Keep API contract deterministic regardless of Flux table chunking.
+            if limit > 0:
+                points = points[:limit]
+
             return points
 
         except Exception as e:
@@ -245,8 +259,9 @@ class InfluxDBRepository:
             }
             
             for key, value in values.items():
-                if key not in ("_start", "_stop", "_time", "_measurement", "_field", "_value", 
-                              "device_id", "schema_version", "enrichment_status", "device_type", "location"):
+                if key not in ("_start", "_stop", "_time", "_measurement", "_field", "_value",
+                               "device_id", "schema_version", "enrichment_status", "device_type",
+                               "location", "table", "result"):
                     if isinstance(value, (int, float)):
                         point_data[key] = value
             

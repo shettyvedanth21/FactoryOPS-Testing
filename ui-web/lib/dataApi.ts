@@ -111,6 +111,30 @@ export interface Alert {
   createdAt: string;
 }
 
+export interface ActivityEvent {
+  eventId: string;
+  tenantId: string | null;
+  deviceId: string | null;
+  ruleId: string | null;
+  alertId: string | null;
+  eventType: string;
+  title: string;
+  message: string;
+  metadataJson: Record<string, any>;
+  isRead: boolean;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface ActivitySummary {
+  active_alerts: number;
+  alerts_triggered: number;
+  alerts_cleared: number;
+  rules_created: number;
+  rules_updated: number;
+  rules_deleted: number;
+}
+
 export async function getDeviceAlerts(
   deviceId: string,
   params?: {
@@ -166,6 +190,122 @@ export async function getDeviceAlerts(
     page: json.page,
     pageSize: json.page_size,
     totalPages: json.total_pages,
+  };
+}
+
+export async function getActivityEvents(params?: {
+  deviceId?: string;
+  eventType?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<{
+  data: ActivityEvent[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}> {
+  const query = new URLSearchParams({
+    page: String(params?.page ?? 1),
+    page_size: String(params?.pageSize ?? 20),
+  });
+
+  if (params?.deviceId) query.append("device_id", params.deviceId);
+  if (params?.eventType) query.append("event_type", params.eventType);
+
+  const res = await fetch(
+    `${RULE_ENGINE_SERVICE_BASE}/api/v1/alerts/events?${query.toString()}`
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+
+  const json = await res.json();
+  return {
+    data: json.data.map((e: any) => ({
+      eventId: e.event_id,
+      tenantId: e.tenant_id,
+      deviceId: e.device_id,
+      ruleId: e.rule_id,
+      alertId: e.alert_id,
+      eventType: e.event_type,
+      title: e.title,
+      message: e.message,
+      metadataJson: e.metadata_json || {},
+      isRead: e.is_read,
+      readAt: e.read_at,
+      createdAt: e.created_at,
+    })),
+    total: json.total,
+    page: json.page,
+    pageSize: json.page_size,
+    totalPages: json.total_pages,
+  };
+}
+
+export async function getActivityUnreadCount(deviceId?: string): Promise<number> {
+  const query = new URLSearchParams();
+  if (deviceId) query.append("device_id", deviceId);
+
+  const res = await fetch(
+    `${RULE_ENGINE_SERVICE_BASE}/api/v1/alerts/events/unread-count?${query.toString()}`
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+  const json = await res.json();
+  return json?.data?.count ?? 0;
+}
+
+export async function markAllActivityRead(deviceId?: string): Promise<number> {
+  const query = new URLSearchParams();
+  if (deviceId) query.append("device_id", deviceId);
+
+  const res = await fetch(
+    `${RULE_ENGINE_SERVICE_BASE}/api/v1/alerts/events/mark-all-read?${query.toString()}`,
+    { method: "PATCH" }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+  const json = await res.json();
+  return json?.data?.updated ?? 0;
+}
+
+export async function clearActivityHistory(deviceId?: string): Promise<number> {
+  const query = new URLSearchParams();
+  if (deviceId) query.append("device_id", deviceId);
+
+  const res = await fetch(
+    `${RULE_ENGINE_SERVICE_BASE}/api/v1/alerts/events?${query.toString()}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+  const json = await res.json();
+  return json?.data?.deleted ?? 0;
+}
+
+export async function getActivitySummary(): Promise<ActivitySummary> {
+  const res = await fetch(`${RULE_ENGINE_SERVICE_BASE}/api/v1/alerts/events/summary`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+  const json = await res.json();
+  return {
+    active_alerts: json?.data?.active_alerts ?? 0,
+    alerts_triggered: json?.data?.alerts_triggered ?? 0,
+    alerts_cleared: json?.data?.alerts_cleared ?? 0,
+    rules_created: json?.data?.rules_created ?? 0,
+    rules_updated: json?.data?.rules_updated ?? 0,
+    rules_deleted: json?.data?.rules_deleted ?? 0,
   };
 }
 

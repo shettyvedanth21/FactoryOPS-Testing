@@ -4,6 +4,7 @@ from typing import List
 
 import aioboto3
 import structlog
+from botocore.exceptions import ClientError
 
 from src.config.settings import get_settings
 
@@ -67,11 +68,22 @@ class S3Client:
     ) -> List[dict]:
 
         async with self._session.client("s3", **self._client_kwargs()) as client:
-            response = await client.list_objects_v2(
-                Bucket=self._bucket,
-                Prefix=prefix,
-                MaxKeys=max_keys,
-            )
+            try:
+                response = await client.list_objects_v2(
+                    Bucket=self._bucket,
+                    Prefix=prefix,
+                    MaxKeys=max_keys,
+                )
+            except ClientError as exc:
+                error_code = exc.response.get("Error", {}).get("Code", "")
+                if error_code == "NoSuchBucket":
+                    self._logger.warning(
+                        "s3_bucket_missing_on_list",
+                        bucket=self._bucket,
+                        prefix=prefix,
+                    )
+                    return []
+                raise
 
             objects = response.get("Contents", [])
 

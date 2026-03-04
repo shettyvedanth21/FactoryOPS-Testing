@@ -252,6 +252,66 @@ export interface HealthScore {
   parameters_skipped: number;
 }
 
+export type PerformanceTrendMetric = "health" | "uptime";
+export type PerformanceTrendRange = "30m" | "1h" | "6h" | "24h" | "7d" | "30d";
+
+export interface PerformanceTrendPoint {
+  timestamp: string;
+  health_score: number | null;
+  uptime_percentage: number | null;
+  planned_minutes: number;
+  effective_minutes: number;
+  break_minutes: number;
+}
+
+export interface PerformanceTrendData {
+  device_id: string;
+  metric: PerformanceTrendMetric;
+  range: PerformanceTrendRange;
+  interval_minutes: number;
+  timezone: string;
+  points: PerformanceTrendPoint[];
+  total_points: number;
+  sampled_points: number;
+  message: string;
+}
+
+export interface DashboardDeviceItem {
+  device_id: string;
+  device_name: string;
+  device_type: string;
+  runtime_status: string;
+  location: string | null;
+  last_seen_timestamp: string | null;
+  health_score: number | null;
+  uptime_percentage: number | null;
+}
+
+export interface DashboardSystemSummary {
+  total_devices: number;
+  running_devices: number;
+  stopped_devices: number;
+  devices_with_health_data: number;
+  devices_with_uptime_configured: number;
+  devices_missing_uptime_config: number;
+  system_health: number | null;
+  average_efficiency: number | null;
+}
+
+export interface DashboardAlertsSummary {
+  active_alerts: number;
+  alerts_triggered: number;
+  alerts_cleared: number;
+  rules_created: number;
+}
+
+export interface DashboardSummaryData {
+  generated_at: string;
+  summary: DashboardSystemSummary;
+  alerts: DashboardAlertsSummary;
+  devices: DashboardDeviceItem[];
+}
+
 export interface TelemetryValues {
   values: Record<string, number>;
   machine_state?: string;
@@ -382,4 +442,36 @@ export async function calculateHealthScore(
     throw new Error(`HTTP ${res.status}`);
   }
   return res.json();
+}
+
+export async function getPerformanceTrends(
+  deviceId: string,
+  metric: PerformanceTrendMetric,
+  range: PerformanceTrendRange
+): Promise<PerformanceTrendData> {
+  const query = new URLSearchParams({
+    metric,
+    range,
+  });
+  const res = await fetch(
+    `${DEVICE_SERVICE_BASE}/api/v1/devices/${deviceId}/performance-trends?${query.toString()}`
+  );
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getDashboardSummary(): Promise<DashboardSummaryData> {
+  const res = await fetch(`${DEVICE_SERVICE_BASE}/api/v1/devices/dashboard/summary`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return {
+    generated_at: json.generated_at,
+    summary: json.summary,
+    alerts: json.alerts,
+    devices: json.devices || [],
+  };
 }

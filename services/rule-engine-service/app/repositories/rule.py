@@ -1,13 +1,14 @@
 """Rule repository layer - data access abstraction."""
 
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from datetime import datetime, timezone
+from uuid import UUID
 
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.rule import Rule, RuleStatus, Alert
+from app.models.rule import Rule, RuleStatus, Alert, ActivityEvent
 
 
 class RuleRepository:
@@ -203,11 +204,12 @@ class AlertRepository:
     
     async def get_by_id(
         self, 
-        alert_id: str,
+        alert_id: str | UUID,
         tenant_id: Optional[str] = None
     ) -> Optional[Alert]:
         """Get alert by ID with optional tenant filtering."""
-        query = select(Alert).where(Alert.alert_id == alert_id)
+        alert_id_str = str(alert_id)
+        query = select(Alert).where(Alert.alert_id == alert_id_str)
         
         if tenant_id is not None:
             query = query.where(Alert.tenant_id == tenant_id)
@@ -219,7 +221,7 @@ class AlertRepository:
         self,
         tenant_id: Optional[str] = None,
         device_id: Optional[str] = None,
-        rule_id: Optional[str] = None,
+        rule_id: Optional[str | UUID] = None,
         status: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
@@ -238,8 +240,9 @@ class AlertRepository:
             count_query = count_query.where(Alert.device_id == device_id)
         
         if rule_id:
-            query = query.where(Alert.rule_id == rule_id)
-            count_query = count_query.where(Alert.rule_id == rule_id)
+            rule_id_str = str(rule_id)
+            query = query.where(Alert.rule_id == rule_id_str)
+            count_query = count_query.where(Alert.rule_id == rule_id_str)
         
         if status:
             query = query.where(Alert.status == status)
@@ -302,3 +305,164 @@ class AlertRepository:
         await self._session.refresh(alert)
 
         return alert
+
+    async def count_by_status(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Count alerts grouped by status."""
+        query = select(Alert.status, func.count(Alert.alert_id)).group_by(Alert.status)
+        if tenant_id is not None:
+            query = query.where(Alert.tenant_id == tenant_id)
+        result = await self._session.execute(query)
+        rows = result.all()
+        return {str(status): int(count) for status, count in rows}
+
+
+class ActivityEventRepository:
+    """Repository for activity event operations."""
+
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        event_type: str,
+        title: str,
+        message: str,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+        rule_id: Optional[str] = None,
+        alert_id: Optional[str] = None,
+        metadata_json: Optional[Dict[str, Any]] = None,
+    ) -> ActivityEvent:
+        event = ActivityEvent(
+            tenant_id=tenant_id,
+            device_id=device_id,
+            rule_id=rule_id,
+            alert_id=alert_id,
+            event_type=event_type,
+            title=title,
+            message=message,
+            metadata_json=metadata_json or {},
+            is_read=False,
+        )
+        self._session.add(event)
+        await self._session.flush()
+        await self._session.refresh(event)
+        return event
+
+    async def list_events(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[List[ActivityEvent], int]:
+        query = select(ActivityEvent)
+        count_query = select(func.count(ActivityEvent.event_id))
+
+        if tenant_id is not None:
+            query = query.where(ActivityEvent.tenant_id == tenant_id)
+            count_query = count_query.where(ActivityEvent.tenant_id == tenant_id)
+
+        if device_id:
+            query = query.where(ActivityEvent.device_id == device_id)
+            count_query = count_query.where(ActivityEvent.device_id == device_id)
+
+        if event_type:
+            query = query.where(ActivityEvent.event_type == event_type)
+            count_query = count_query.where(ActivityEvent.event_type == event_type)
+
+        total_result = await self._session.execute(count_query)
+        total = total_result.scalar() or 0
+
+        offset = (page - 1) * page_size
+        query = query.order_by(ActivityEvent.created_at.desc()).offset(offset).limit(page_size)
+
+        result = await self._session.execute(query)
+        return list(result.scalars().all()), total
+
+    async def unread_count(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        query = select(func.count(ActivityEvent.event_id)).where(ActivityEvent.is_read.is_(False))
+
+        if tenant_id is not None:
+            query = query.where(ActivityEvent.tenant_id == tenant_id)
+        if device_id:
+            query = query.where(ActivityEvent.device_id == device_id)
+
+        result = await self._session.execute(query)
+        return result.scalar() or 0
+
+    async def mark_all_read(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        query = select(ActivityEvent).where(ActivityEvent.is_read.is_(False))
+
+        if tenant_id is not None:
+            query = query.where(ActivityEvent.tenant_id == tenant_id)
+        if device_id:
+            query = query.where(ActivityEvent.device_id == device_id)
+
+        rows = (await self._session.execute(query)).scalars().all()
+        now = datetime.now(timezone.utc)
+        for event in rows:
+            event.is_read = True
+            event.read_at = now
+
+        await self._session.flush()
+        return len(rows)
+
+    async def clear_history(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> int:
+        query = select(ActivityEvent)
+
+        if tenant_id is not None:
+            query = query.where(ActivityEvent.tenant_id == tenant_id)
+        if device_id:
+            query = query.where(ActivityEvent.device_id == device_id)
+
+        rows = (await self._session.execute(query)).scalars().all()
+        count = len(rows)
+        for event in rows:
+            await self._session.delete(event)
+        await self._session.flush()
+        return count
+
+    async def count_by_event_types(
+        self,
+        event_types: List[str],
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Count activity events grouped by event type."""
+        if not event_types:
+            return {}
+
+        query = (
+            select(ActivityEvent.event_type, func.count(ActivityEvent.event_id))
+            .where(ActivityEvent.event_type.in_(event_types))
+            .group_by(ActivityEvent.event_type)
+        )
+        if tenant_id is not None:
+            query = query.where(ActivityEvent.tenant_id == tenant_id)
+
+        result = await self._session.execute(query)
+        rows = result.all()
+        return {str(event_type): int(count) for event_type, count in rows}

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import uuid
 
 from sqlalchemy import String, DateTime, Float, Integer, Text, ForeignKey, JSON
@@ -182,3 +182,38 @@ class Alert(Base):
 
     def __repr__(self) -> str:
         return f"<Alert(alert_id={self.alert_id}, rule_id={self.rule_id}, status={self.status})>"
+
+
+class ActivityEvent(Base):
+    """Activity event model for device/rule alert history."""
+
+    __tablename__ = "activity_events"
+
+    event_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    device_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, index=True)
+    rule_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    alert_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+    is_read: Mapped[bool] = mapped_column(default=False, nullable=False, index=True)
+    read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<ActivityEvent(event_id={self.event_id}, type={self.event_type}, device_id={self.device_id})>"

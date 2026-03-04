@@ -4,7 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { listRules, createRule, updateRuleStatus, deleteRule, Rule, RuleStatus } from "@/lib/ruleApi";
 import { getDevices, Device } from "@/lib/deviceApi";
-import { getAllDevicesProperties, getCommonProperties, getDeviceProperties } from "@/lib/dataApi";
+import {
+  getAllDevicesProperties,
+  getCommonProperties,
+  getDeviceProperties,
+  getActivityEvents,
+  clearActivityHistory,
+  ActivityEvent,
+} from "@/lib/dataApi";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Select, Checkbox } from "@/components/ui/input";
@@ -44,6 +51,8 @@ export default function RulesPage() {
   const [allDeviceProperties, setAllDeviceProperties] = useState<Record<string, string[]>>({});
   const [availableProperties, setAvailableProperties] = useState<{value: string, label: string}[]>([]);
   const [propertiesLoading, setPropertiesLoading] = useState(true);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
+  const [selectedAlertDevice, setSelectedAlertDevice] = useState<string>("all");
   
   const [formData, setFormData] = useState<{
     ruleName: string;
@@ -76,10 +85,11 @@ export default function RulesPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [rulesResult, devicesResult, propsResult] = await Promise.allSettled([
+      const [rulesResult, devicesResult, propsResult, eventsResult] = await Promise.allSettled([
         listRules(),
         getDevices(),
         getAllDevicesProperties(),
+        getActivityEvents({ page: 1, pageSize: 50 }),
       ]);
 
       if (rulesResult.status === "fulfilled") {
@@ -111,6 +121,13 @@ export default function RulesPage() {
         console.error("Failed to load device properties:", propsResult.reason);
         setAllDeviceProperties({});
       }
+
+      if (eventsResult.status === "fulfilled") {
+        setActivityEvents(eventsResult.value.data);
+      } else {
+        console.error("Failed to load activity events:", eventsResult.reason);
+        setActivityEvents([]);
+      }
     } catch (err) {
       console.error("Failed to load data:", err);
     } finally {
@@ -118,6 +135,23 @@ export default function RulesPage() {
       setPropertiesLoading(false);
     }
   };
+
+  const handleClearRulesHistory = async () => {
+    const targetDevice = selectedAlertDevice === "all" ? undefined : selectedAlertDevice;
+    const label = targetDevice ? `for ${targetDevice}` : "for all devices";
+    if (!confirm(`Clear alert history ${label}?`)) return;
+
+    try {
+      await clearActivityHistory(targetDevice);
+      loadData();
+    } catch (err) {
+      console.error("Failed to clear activity history:", err);
+    }
+  };
+
+  const filteredEvents = selectedAlertDevice === "all"
+    ? activityEvents
+    : activityEvents.filter((e) => e.deviceId === selectedAlertDevice);
 
   useEffect(() => {
     async function updateAvailableProperties() {
@@ -502,6 +536,57 @@ export default function RulesPage() {
                   </TableBody>
                 </Table>
               )}
+          </CardContent>
+        </Card>
+
+        <Card className="mt-6">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle>Alert History</CardTitle>
+              <p className="text-sm text-slate-500 mt-1">Rule created, triggered, acknowledged, resolved history</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Select
+                value={selectedAlertDevice}
+                onChange={(e) => setSelectedAlertDevice(e.target.value)}
+                className="w-64"
+                options={[
+                  { value: "all", label: "All Devices" },
+                  ...devices.map((d) => ({ value: d.id, label: `${d.name} (${d.id})` })),
+                ]}
+              />
+              <Button variant="danger" onClick={handleClearRulesHistory}>
+                Clear History
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {filteredEvents.length === 0 ? (
+              <div className="text-center py-10 text-slate-500">No alert events found</div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Time</TableHead>
+                    <TableHead>Device</TableHead>
+                    <TableHead>Event</TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead>Message</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredEvents.map((event) => (
+                    <TableRow key={event.eventId}>
+                      <TableCell>{new Date(event.createdAt).toLocaleString()}</TableCell>
+                      <TableCell className="font-mono text-xs">{event.deviceId || "GLOBAL"}</TableCell>
+                      <TableCell className="capitalize">{event.eventType.replace(/_/g, " ")}</TableCell>
+                      <TableCell>{event.title}</TableCell>
+                      <TableCell className="max-w-md truncate">{event.message}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </CardContent>
         </Card>
       </div>

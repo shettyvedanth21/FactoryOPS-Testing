@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     
     # API
     API_PREFIX: str = "/api/v1"
+
+    # Service integration
+    DATA_SERVICE_BASE_URL: str = "http://data-service:8081"
+    RULE_ENGINE_SERVICE_BASE_URL: str = "http://rule-engine-service:8002"
+
+    # Performance trends
+    PERFORMANCE_TRENDS_ENABLED: bool = True
+    PERFORMANCE_TRENDS_CRON_ENABLED: bool = True
+    PERFORMANCE_TRENDS_INTERVAL_MINUTES: int = 5
+    PERFORMANCE_TRENDS_RETENTION_DAYS: int = 35
+    PERFORMANCE_TRENDS_MAX_POINTS: int = 600
+    PERFORMANCE_TRENDS_TIMEZONE: str = "Asia/Kolkata"
     
     # Logging
     LOG_LEVEL: str = "INFO"

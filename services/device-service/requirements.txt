@@ -8,3 +8,4 @@ pydantic-settings==2.1.0
 alembic==1.13.1
 python-json-logger==2.0.7
 structlog==24.1.0
+httpx==0.27.2

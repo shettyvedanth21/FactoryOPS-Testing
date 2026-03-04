@@ -29,6 +29,8 @@ from app.schemas.device import (
     WeightValidationResponse,
     TelemetryValues,
     HealthScoreResponse,
+    PerformanceTrendResponse,
+    DashboardSummaryResponse,
 )
 from app.services.device import DeviceService
 import logging
@@ -89,6 +91,21 @@ async def get_common_properties(
         "properties": common,
         "device_count": len(device_ids),
     }
+
+
+@router.get(
+    "/dashboard/summary",
+    response_model=DashboardSummaryResponse,
+)
+async def get_dashboard_summary(
+    db: AsyncSession = Depends(get_db),
+) -> DashboardSummaryResponse:
+    """Get home dashboard aggregates across all devices."""
+    from app.services.dashboard import DashboardService
+
+    service = DashboardService(db)
+    summary = await service.get_dashboard_summary()
+    return DashboardSummaryResponse(**summary)
 
 
 @router.get(
@@ -493,6 +510,25 @@ async def get_uptime(
     return UptimeResponse(**uptime)
 
 
+@router.get(
+    "/{device_id}/performance-trends",
+    response_model=PerformanceTrendResponse,
+)
+async def get_performance_trends(
+    device_id: str,
+    metric: str = Query("health", pattern="^(health|uptime)$"),
+    range: str = Query("24h", pattern="^(30m|1h|6h|24h|7d|30d)$"),
+    db: AsyncSession = Depends(get_db),
+) -> PerformanceTrendResponse:
+    """Get materialized performance trends for a device."""
+    from app.services.performance_trends import PerformanceTrendService
+
+    service = PerformanceTrendService(db)
+    result = await service.get_trends(device_id=device_id, metric=metric, range_key=range)
+
+    return PerformanceTrendResponse(**result)
+
+
 # =====================================================
 # Health Configuration Endpoints
 # =====================================================
@@ -546,6 +582,27 @@ async def list_health_configs(
     configs = await service.get_health_configs_by_device(device_id, tenant_id)
     
     return ParameterHealthConfigListResponse(data=configs, total=len(configs))
+
+
+@router.get(
+    "/{device_id}/health-config/validate-weights",
+    response_model=WeightValidationResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Device not found"},
+    },
+)
+async def validate_health_weights(
+    device_id: str,
+    tenant_id: Optional[str] = Query(None, description="Tenant ID for multi-tenancy"),
+    db: AsyncSession = Depends(get_db),
+) -> WeightValidationResponse:
+    """Validate that all health parameter weights sum to 100%."""
+    from app.services.health_config import HealthConfigService
+
+    service = HealthConfigService(db)
+    validation = await service.validate_weights(device_id, tenant_id)
+
+    return WeightValidationResponse(**validation)
 
 
 @router.get(
@@ -658,27 +715,6 @@ async def delete_health_config(
     }
 
 
-@router.get(
-    "/{device_id}/health-config/validate-weights",
-    response_model=WeightValidationResponse,
-    responses={
-        404: {"model": ErrorResponse, "description": "Device not found"},
-    },
-)
-async def validate_health_weights(
-    device_id: str,
-    tenant_id: Optional[str] = Query(None, description="Tenant ID for multi-tenancy"),
-    db: AsyncSession = Depends(get_db),
-) -> WeightValidationResponse:
-    """Validate that all health parameter weights sum to 100%."""
-    from app.services.health_config import HealthConfigService
-    
-    service = HealthConfigService(db)
-    validation = await service.validate_weights(device_id, tenant_id)
-    
-    return WeightValidationResponse(**validation)
-
-
 @router.post(
     "/{device_id}/health-config/bulk",
     response_model=ParameterHealthConfigListResponse,
@@ -783,16 +819,31 @@ async def sync_device_properties(
     to track device runtime status.
     """
     from app.services.device_property import DevicePropertyService
-    
+    from app.services.device import DeviceService
+
+    # Prevent noisy 500s for unknown/legacy publisher IDs.
+    device_service = DeviceService(db)
+    device = await device_service.get_device(device_id)
+    if not device:
+        logger.warning(
+            "Ignoring property sync for unknown device",
+            extra={"device_id": device_id},
+        )
+        return {
+            "success": False,
+            "skipped": True,
+            "error": f"Device {device_id} not found",
+            "properties_discovered": 0,
+            "property_names": [],
+        }
+
     # Sync properties
     property_service = DevicePropertyService(db)
     properties = await property_service.sync_from_telemetry(device_id, telemetry)
-    
+
     # Update last_seen_timestamp for runtime status tracking
-    from app.services.device import DeviceService
-    device_service = DeviceService(db)
     await device_service.update_last_seen(device_id)
-    
+
     return {
         "success": True,
         "properties_discovered": len(properties),

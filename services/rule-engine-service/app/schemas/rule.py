@@ -268,6 +268,25 @@ class AlertResponse(AlertBase):
     created_at: datetime
 
 
+class ActivityEventResponse(BaseModel):
+    """Schema for activity event response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    event_id: UUID
+    tenant_id: Optional[str] = None
+    device_id: Optional[str] = None
+    rule_id: Optional[UUID] = None
+    alert_id: Optional[UUID] = None
+    event_type: str
+    title: str
+    message: str
+    metadata_json: Dict[str, Any]
+    is_read: bool
+    read_at: Optional[datetime] = None
+    created_at: datetime
+
+
 class ErrorResponse(BaseModel):
     """Schema for error responses."""
     
