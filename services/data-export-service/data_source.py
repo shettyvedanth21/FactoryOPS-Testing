@@ -171,8 +171,9 @@ class DataSourceClient:
             |> range(start: {start_iso}, stop: {end_iso})
             |> filter(fn: (r) => r._measurement == "device_telemetry")
             |> filter(fn: (r) => r.device_id == "{device_id}")
-            |> filter(fn: (r) => r._field == "power")
-            |> count()
+            |> count(column: "_value")
+            |> group()
+            |> sum(column: "_value")
         """
         
         try:

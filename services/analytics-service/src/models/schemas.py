@@ -24,11 +24,12 @@ class AnalyticsRequest(BaseModel):
     """
     Analytics job request.
 
-    Either:
+    At least one of the following must be provided:
       - dataset_key
-    OR
       - start_time + end_time
-    must be provided.
+
+    When both are provided, dataset_key is used for loading and time range is
+    retained for audit/metadata purposes.
     """
 
     device_id: str
@@ -46,11 +47,6 @@ class AnalyticsRequest(BaseModel):
     def validate_dataset_or_timerange(self):
         has_dataset = self.dataset_key is not None
         has_range = self.start_time is not None and self.end_time is not None
-
-        if has_dataset and has_range:
-            raise ValueError(
-                "Provide either dataset_key OR start_time/end_time, not both"
-            )
 
         if not has_dataset and not has_range:
             raise ValueError(

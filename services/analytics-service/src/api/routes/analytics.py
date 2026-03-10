@@ -62,9 +62,47 @@ async def run_analytics(
         device_id=request.device_id,
     )
 
+    resolved_request = request
+    if not request.dataset_key and request.start_time and request.end_time:
+        settings = get_settings()
+        s3_client = S3Client()
+        dataset_service = DatasetService(s3_client)
+        _, dataset_key = await _ensure_device_ready(
+            s3_client=s3_client,
+            dataset_service=dataset_service,
+            device_id=request.device_id,
+            start_time=request.start_time,
+            end_time=request.end_time,
+        )
+        if not dataset_key:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "DATASET_NOT_READY",
+                    "code": "DATASET_NOT_READY",
+                    "message": (
+                        "No dataset available for the selected date range after export readiness checks. "
+                        "Ensure telemetry exists in that range and retry."
+                    ),
+                    "device_id": request.device_id,
+                    "start_time": request.start_time.isoformat(),
+                    "end_time": request.end_time.isoformat(),
+                    "data_readiness_gate_enabled": settings.ml_data_readiness_gate_enabled,
+                },
+            )
+        resolved_request = request.model_copy(update={"dataset_key": dataset_key})
+        logger.info(
+            "single_analytics_dataset_resolved",
+            job_id=job_id,
+            device_id=request.device_id,
+            dataset_key=dataset_key,
+            start_time=request.start_time.isoformat(),
+            end_time=request.end_time.isoformat(),
+        )
+
     await job_queue.submit_job(
         job_id=job_id,
-        request=request,
+        request=resolved_request,
     )
     if not hasattr(app_request.app.state, "pending_jobs"):
         app_request.app.state.pending_jobs = {}
@@ -102,10 +140,24 @@ async def _fetch_all_device_ids() -> List[str]:
         return []
 
 
-async def _trigger_export(device_id: str) -> None:
+async def _trigger_export(
+    device_id: str,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> dict:
     settings = get_settings()
     url = f"{settings.data_export_service_url}/api/v1/exports/run"
-    payload = {"device_id": device_id}
+    payload: Dict[str, object] = {"device_id": device_id}
+    if start_time and end_time:
+        payload["start_time"] = start_time.isoformat()
+        payload["end_time"] = end_time.isoformat()
+
+    logger.info(
+        "data_readiness_trigger_export",
+        device_id=device_id,
+        start_time=start_time.isoformat() if start_time else None,
+        end_time=end_time.isoformat() if end_time else None,
+    )
     async with aiohttp.ClientSession() as session:
         async with session.post(
             url,
@@ -115,20 +167,56 @@ async def _trigger_export(device_id: str) -> None:
             if resp.status >= 400:
                 text = await resp.text()
                 raise RuntimeError(f"export trigger failed ({resp.status}): {text}")
+            return await resp.json()
 
 
 async def _wait_for_dataset_key(
+    device_id: str,
+    data_export_service_url: str,
     s3_client: S3Client,
     expected_key: str,
-) -> bool:
+) -> Optional[str]:
     settings = get_settings()
     delay = settings.data_readiness_initial_delay_seconds
     attempts = settings.data_readiness_poll_attempts
     for i in range(max(1, attempts)):
         if await s3_client.object_exists(expected_key):
-            return True
+            return expected_key
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{data_export_service_url}/api/v1/exports/status/{device_id}",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status == 200:
+                        status_payload = await resp.json()
+                        export_status = str(status_payload.get("status", "")).lower()
+                        s3_key = status_payload.get("s3_key")
+
+                        if export_status == "failed":
+                            logger.warning(
+                                "data_readiness_export_failed",
+                                device_id=device_id,
+                                expected_key=expected_key,
+                                status_payload=status_payload,
+                            )
+                            return None
+
+                        if s3_key and isinstance(s3_key, str):
+                            if await s3_client.object_exists(s3_key):
+                                return s3_key
+        except Exception as exc:
+            logger.warning(
+                "data_readiness_status_check_error",
+                device_id=device_id,
+                expected_key=expected_key,
+                error=str(exc),
+            )
         await asyncio.sleep(delay * (2 ** i))
-    return await s3_client.object_exists(expected_key)
+    if await s3_client.object_exists(expected_key):
+        return expected_key
+    return None
 
 
 async def _ensure_device_ready(
@@ -143,7 +231,19 @@ async def _ensure_device_ready(
     """
     settings = get_settings()
     expected_key = dataset_service.construct_expected_s3_key(device_id, start_time, end_time)
+    logger.info(
+        "data_readiness_check_started",
+        device_id=device_id,
+        expected_key=expected_key,
+        start_time=start_time.isoformat(),
+        end_time=end_time.isoformat(),
+    )
     if await s3_client.object_exists(expected_key):
+        logger.info(
+            "data_readiness_expected_key_found",
+            device_id=device_id,
+            dataset_key=expected_key,
+        )
         return device_id, expected_key
 
     # Reuse the same "best available dataset" strategy as single-device execution.
@@ -155,22 +255,61 @@ async def _ensure_device_ready(
         end_time=end_time,
     )
     if fallback_key:
+        logger.info(
+            "data_readiness_fallback_key_found",
+            device_id=device_id,
+            fallback_key=fallback_key,
+            expected_key=expected_key,
+        )
         return device_id, fallback_key
 
     if settings.ml_data_readiness_gate_enabled:
         try:
-            await _trigger_export(device_id)
-            exists = await _wait_for_dataset_key(s3_client, expected_key)
-            if exists:
-                return device_id, expected_key
+            export_trigger_response = await _trigger_export(
+                device_id=device_id,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            logger.info(
+                "data_readiness_export_triggered",
+                device_id=device_id,
+                expected_key=expected_key,
+                export_response=export_trigger_response,
+            )
+            resolved_key = await _wait_for_dataset_key(
+                device_id=device_id,
+                data_export_service_url=settings.data_export_service_url,
+                s3_client=s3_client,
+                expected_key=expected_key,
+            )
+            if resolved_key:
+                logger.info(
+                    "data_readiness_export_key_resolved",
+                    device_id=device_id,
+                    resolved_key=resolved_key,
+                    expected_key=expected_key,
+                )
+                return device_id, resolved_key
             fallback_after_export = await dataset_service.get_best_available_dataset_key(
                 device_id=device_id,
                 start_time=start_time,
                 end_time=end_time,
             )
             if fallback_after_export:
+                logger.info(
+                    "data_readiness_fallback_after_export",
+                    device_id=device_id,
+                    fallback_key=fallback_after_export,
+                    expected_key=expected_key,
+                )
                 return device_id, fallback_after_export
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "data_readiness_export_error",
+                device_id=device_id,
+                expected_key=expected_key,
+                error=str(exc),
+            )
             fallback_after_error = await dataset_service.get_best_available_dataset_key(
                 device_id=device_id,
                 start_time=start_time,

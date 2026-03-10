@@ -6,6 +6,7 @@ telemetry data for configured devices.
 
 import asyncio
 from datetime import datetime, timezone
+from typing import Optional
 
 from config import Settings
 from checkpoint import CheckpointRepository
@@ -174,7 +175,12 @@ class ExportWorker:
                 # Continue with next device
                 continue
     
-    async def force_export(self, device_id: str | None = None) -> None:
+    async def force_export(
+        self,
+        device_id: str | None = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> None:
         """Force immediate export.
         
         Args:
@@ -188,7 +194,10 @@ class ExportWorker:
         for dev_id in devices:
             try:
                 result = await self.exporter.export_device_data(
-                    dev_id, force_full=True
+                    dev_id,
+                    force_full=(start_time is None or end_time is None),
+                    force_start_time=start_time,
+                    force_end_time=end_time,
                 )
                 logger.info(
                     f"Force export completed for {dev_id}",
@@ -196,6 +205,9 @@ class ExportWorker:
                         "device_id": dev_id,
                         "record_count": result.record_count,
                         "success": result.success,
+                        "mode": "forced_range" if start_time and end_time else "force_full",
+                        "start_time": start_time.isoformat() if start_time else None,
+                        "end_time": end_time.isoformat() if end_time else None,
                     }
                 )
             except Exception as e:

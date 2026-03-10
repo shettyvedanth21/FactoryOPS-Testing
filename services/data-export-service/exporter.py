@@ -35,7 +35,9 @@ class TelemetryExporter:
     async def export_device_data(
         self,
         device_id: str,
-        force_full: bool = False
+        force_full: bool = False,
+        force_start_time: datetime | None = None,
+        force_end_time: datetime | None = None,
     ) -> ExportResult:
 
         wall_start = time.time()
@@ -44,10 +46,30 @@ class TelemetryExporter:
             # -------------------------------------------------------
             # Decide export window
             # -------------------------------------------------------
-            if force_full:
+            if force_start_time is not None and force_end_time is not None:
+                start_time_export = (
+                    force_start_time.replace(tzinfo=timezone.utc)
+                    if force_start_time.tzinfo is None
+                    else force_start_time.astimezone(timezone.utc)
+                )
+                end_time_export = (
+                    force_end_time.replace(tzinfo=timezone.utc)
+                    if force_end_time.tzinfo is None
+                    else force_end_time.astimezone(timezone.utc)
+                )
+                if end_time_export <= start_time_export:
+                    raise ValueError("end_time must be after start_time")
+                window_hours = (end_time_export - start_time_export).total_seconds() / 3600.0
+                if window_hours > self.settings.max_force_export_window_hours:
+                    raise ValueError(
+                        f"Requested export window exceeds max_force_export_window_hours="
+                        f"{self.settings.max_force_export_window_hours}"
+                    )
+            elif force_full:
                 start_time_export = datetime.now(timezone.utc) - timedelta(
                     hours=self.settings.max_export_window_hours
                 )
+                end_time_export = datetime.now(timezone.utc)
             else:
                 checkpoint = await self.checkpoint_repo.get_last_checkpoint(device_id)
                 if checkpoint and checkpoint.status == ExportStatus.COMPLETED:
@@ -56,8 +78,7 @@ class TelemetryExporter:
                     start_time_export = datetime.now(timezone.utc) - timedelta(
                         hours=self.settings.lookback_hours
                     )
-
-            end_time_export = datetime.now(timezone.utc)
+                end_time_export = datetime.now(timezone.utc)
 
             # -------------------------------------------------------
             # Check if there is data

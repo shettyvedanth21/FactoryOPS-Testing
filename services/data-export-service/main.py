@@ -46,6 +46,9 @@ class ReadyResponse(BaseModel):
 
 class ExportRequest(BaseModel):
     device_id: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    request_id: Optional[str] = None
 
 
 @asynccontextmanager
@@ -170,14 +173,60 @@ async def run_export(req: ExportRequest = Body(...)):
         )
 
     try:
-        await _worker.force_export(device_id=req.device_id)
+        if (req.start_time is None) ^ (req.end_time is None):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "VALIDATION_ERROR",
+                    "code": "VALIDATION_ERROR",
+                    "message": "start_time and end_time must be provided together",
+                },
+            )
+        if req.start_time and req.end_time and req.end_time <= req.start_time:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "VALIDATION_ERROR",
+                    "code": "VALIDATION_ERROR",
+                    "message": "end_time must be after start_time",
+                },
+            )
+
+        settings = get_settings()
+        if req.start_time and req.end_time:
+            window_hours = (req.end_time - req.start_time).total_seconds() / 3600.0
+            if window_hours > settings.max_force_export_window_hours:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "VALIDATION_ERROR",
+                        "code": "VALIDATION_ERROR",
+                        "message": (
+                            f"Requested export window exceeds max allowed "
+                            f"{settings.max_force_export_window_hours} hours"
+                        ),
+                        "max_force_export_window_hours": settings.max_force_export_window_hours,
+                    },
+                )
+
+        await _worker.force_export(
+            device_id=req.device_id,
+            start_time=req.start_time,
+            end_time=req.end_time,
+        )
 
         return {
             "status": "accepted",
             "device_id": req.device_id,
+            "request_id": req.request_id,
+            "mode": "forced_range" if req.start_time and req.end_time else "force_full",
+            "start_time": req.start_time.isoformat() if req.start_time else None,
+            "end_time": req.end_time.isoformat() if req.end_time else None,
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("On-demand export failed")
         raise HTTPException(
             status_code=500,

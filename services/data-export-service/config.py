@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     lookback_hours: int = 1
     max_export_window_hours: int = 24
+    max_force_export_window_hours: int = 720
 
     device_ids: str = "D1"
 
